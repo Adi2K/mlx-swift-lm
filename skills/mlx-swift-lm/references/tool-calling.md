@@ -31,8 +31,10 @@ mlx-swift-lm supports function calling / tool use with multiple model-specific f
 | `.json` | Llama, Qwen, most models | `<tool_call>{"name":"f","arguments":{...}}</tool_call>` |
 | `.lfm2` | LFM2 | `<\|tool_call_start\|>{"name":"f",...}<\|tool_call_end\|>` |
 | `.xmlFunction` | Nemotron, Qwen3 Coder, Qwen3.5 | `<tool_call><function=name><parameter=k>v</parameter></function></tool_call>` |
-| `.glm4` | GLM4 | `func<arg_key>k</arg_key><arg_value>v</arg_value>` |
+| `.glm4` | GLM-4.5/4.6 (glm4_moe) | `<tool_call>func<arg_key>k</arg_key><arg_value>v</arg_value></tool_call>` |
+| `.glm40414` | GLM-4-0414, GLM-Z1-0414 (glm4) | `func\n{"k": "v"}` |
 | `.gemma` | Gemma | `call:name{key:value}` |
+| `.gptOss` | GPT-OSS | `<\|channel\|>commentary to=functions.name <\|constrain\|>json<\|message\|>{...}<\|call\|>` |
 | `.kimiK2` | Kimi K2 | `functions.name:0<\|tool_call_argument_begin\|>{...}` |
 | `.minimaxM2` | MiniMax M2 | `<invoke name="f"><parameter name="k">v</parameter></invoke>` |
 
@@ -191,7 +193,8 @@ Formats are auto-detected from model type:
 ```swift
 // Auto-detected based on model_type in config.json
 ToolCallFormat.infer(from: "lfm2")     // -> .lfm2
-ToolCallFormat.infer(from: "glm4")     // -> .glm4
+ToolCallFormat.infer(from: "glm4")     // -> .glm40414 (dense GLM-4-0414 / GLM-Z1-0414)
+ToolCallFormat.infer(from: "glm4_moe") // -> .glm4 (GLM-4.5/4.6 MoE)
 ToolCallFormat.infer(from: "gemma")    // -> .gemma
 ToolCallFormat.infer(from: "llama")    // -> nil (use default .json)
 ```
@@ -201,7 +204,7 @@ ToolCallFormat.infer(from: "llama")    // -> nil (use default .json)
 ```swift
 let config = ModelConfiguration(
     id: "mlx-community/GLM-4-9B-0414-4bit",
-    toolCallFormat: .glm4
+    toolCallFormat: .glm40414
 )
 ```
 
