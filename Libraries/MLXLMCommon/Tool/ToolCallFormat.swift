@@ -19,6 +19,14 @@ public protocol ToolCallParser: Sendable {
     /// Returns `nil` for inline formats that don't use wrapper tags.
     var endTag: String? { get }
 
+    /// Whether this is an inline format whose function name precedes the JSON
+    /// arguments (e.g. GLM-4-0414's `name\n{...}`).
+    ///
+    /// For such formats the streaming processor must retain the leading name
+    /// instead of emitting the pre-`{` text as regular output. Defaults to
+    /// `false`; only tagless "leading name" parsers override it.
+    var usesLeadingFunctionName: Bool { get }
+
     /// Parse the content into a `ToolCall`.
     /// - Parameters:
     ///   - content: The text content to parse (may include tags)
@@ -35,6 +43,8 @@ public protocol ToolCallParser: Sendable {
 }
 
 extension ToolCallParser {
+    public var usesLeadingFunctionName: Bool { false }
+
     public func parseEOS(_ toolCallBuffer: String, tools: [[String: any Sendable]]?) -> [ToolCall] {
         if let startTag {
             return
@@ -74,9 +84,14 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
     /// Example: `<tool_call><function=name><parameter=key>value</parameter></function></tool_call>`
     case xmlFunction = "xml_function"
 
-    /// GLM4 format with arg_key/arg_value tags.
-    /// Example: `func<arg_key>k</arg_key><arg_value>v</arg_value>`
+    /// GLM-4.5/4.6 MoE (`glm4_moe`) format with arg_key/arg_value tags.
+    /// Example: `<tool_call>func<arg_key>k</arg_key><arg_value>v</arg_value></tool_call>`
     case glm4
+
+    /// GLM-4-0414 dense (`glm4`, `Glm4ForCausalLM`) tagless format: the function
+    /// name, a newline, then the JSON arguments. Also used by GLM-Z1-*-0414.
+    /// Example: `get_lab_result\n{"test_name": "hemoglobin"}`
+    case glm40414 = "glm4_0414"
 
     /// Gemma function call format.
     /// Example: `<start_function_call>call:name{key:value,k:<escape>str<escape>}<end_function_call>`
@@ -121,6 +136,8 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
             return XMLFunctionParser(startTag: "<tool_call>", endTag: "</tool_call>")
         case .glm4:
             return GLM4ToolCallParser()
+        case .glm40414:
+            return GLM40414ToolCallParser()
         case .gemma:
             return GemmaFunctionParser(
                 startTag: "<start_function_call>", endTag: "<end_function_call>",
@@ -192,7 +209,15 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
             return .lfm2
         }
 
-        // GLM4 family (glm4, glm4_moe, glm4_moe_lite, etc.)
+        // GLM-4-0414 dense family: model_type is exactly "glm4" (Glm4ForCausalLM),
+        // covering GLM-4-*-0414 and GLM-Z1-*-0414. These use the tagless
+        // `name\n{json}` format, distinct from the tagged glm4_moe format below.
+        if type == "glm4" {
+            return .glm40414
+        }
+
+        // GLM-4.5/4.6 MoE family (glm4_moe, glm4_moe_lite, etc.) and other glm4*
+        // variants use the tagged <tool_call>…<arg_key>…<arg_value>… format.
         if type.hasPrefix("glm4") {
             return .glm4
         }

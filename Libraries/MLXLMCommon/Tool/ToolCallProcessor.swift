@@ -36,6 +36,17 @@ public class ToolCallProcessor {
     private var toolCallBuffer = ""
     private var emittedToolCallIDs: Set<String> = []
 
+    /// Streaming stage for leading-name inline formats (see `usesLeadingFunctionName`).
+    private var leadingNameStage = LeadingNameStage.buffering
+    /// Declared tool names, used to gate leading-name detection when available.
+    private lazy var toolNameSet: Set<String>? = {
+        guard let tools else { return nil }
+        let names = tools.compactMap {
+            ($0["function"] as? [String: any Sendable])?["name"] as? String
+        }
+        return names.isEmpty ? nil : Set(names)
+    }()
+
     /// The tool calls extracted during processing.
     public var toolCalls: [ToolCall] = []
 
@@ -52,6 +63,19 @@ public class ToolCallProcessor {
         case none
         case tagged
         case bareJSON
+    }
+
+    private enum LeadingNameStage {
+        /// Withholding output while deciding whether the turn opens with a call.
+        case buffering
+        /// Decided the turn is not (or is no longer) a leading-name tool call span.
+        case passthrough
+    }
+
+    private enum LeadingNameViability {
+        case rejected
+        case incomplete
+        case complete(trailing: String)
     }
 
     // MARK: - Initialization
@@ -85,6 +109,9 @@ public class ToolCallProcessor {
     /// - Parameter chunk: The text chunk to process
     /// - Returns: Regular text that should be displayed (non-tool call content), or `nil` if buffering
     public func processChunk(_ chunk: String) -> String? {
+        if parser.usesLeadingFunctionName {
+            return processLeadingNameChunk(chunk)
+        }
         if isInlineFormat {
             return processInlineChunk(chunk)
         }
@@ -126,6 +153,9 @@ public class ToolCallProcessor {
     ///   `returnBufferedText` is `false`).
     @discardableResult
     public func processEOS(returnBufferedText: Bool = true) -> String? {
+        if parser.usesLeadingFunctionName {
+            return processLeadingNameEOS(returnBufferedText: returnBufferedText)
+        }
         guard
             state == .collectingToolCall || state == .potentialToolCall
                 || state == .collectingJSONToolCall
@@ -146,6 +176,149 @@ public class ToolCallProcessor {
     }
 
     // MARK: - Private Methods
+
+    // MARK: - Leading-name inline formats (GLM-4-0414)
+
+    /// Process a chunk for inline formats whose function name precedes the JSON
+    /// arguments (`name\n{...}`, no wrapper tags).
+    ///
+    /// Since the name streams as ordinary text before the `{`, the pre-`{` text is
+    /// withheld until the processor can confirm a call: the leading token must be a
+    /// bare function name — one of the declared tools, when schemas are available —
+    /// immediately followed by a JSON object. As soon as the buffered prefix can no
+    /// longer become such a span (a non-identifier character, a non-matching name,
+    /// or a non-object after the name) it is flushed verbatim and the remainder of
+    /// the turn passes through as regular text.
+    private func processLeadingNameChunk(_ chunk: String) -> String? {
+        if leadingNameStage == .passthrough {
+            return chunk.isEmpty ? nil : chunk
+        }
+
+        toolCallBuffer += chunk
+
+        switch leadingNameViability(toolCallBuffer) {
+        case .incomplete:
+            return nil
+
+        case .rejected:
+            let text = toolCallBuffer
+            toolCallBuffer = ""
+            leadingNameStage = .passthrough
+            return text.isEmpty ? nil : text
+
+        case .complete(let trailing):
+            // The call span is the buffer with the trailing remainder removed.
+            let spanEnd = toolCallBuffer.index(toolCallBuffer.endIndex, offsetBy: -trailing.count)
+            let span = String(toolCallBuffer[..<spanEnd])
+            toolCallBuffer = ""
+
+            guard let toolCall = parser.parse(content: span, tools: tools) else {
+                // Looked like a call but did not parse — emit verbatim as text.
+                leadingNameStage = .passthrough
+                return span + trailing
+            }
+
+            appendToolCall(toolCall)
+
+            // A subsequent call may follow (`<|assistant|>name\n{...}`), in this
+            // chunk's trailing remainder or a later chunk, so keep detecting rather
+            // than falling through to passthrough. A turn that ends after the call
+            // leaves an empty buffer, which `processEOS` treats as a no-op.
+            leadingNameStage = .buffering
+            return trailing.isEmpty ? nil : processLeadingNameChunk(trailing)
+        }
+    }
+
+    /// Extract any leading-name tool call still buffered at generation end.
+    ///
+    /// The token that terminates a GLM-4-0414 call (`<|observation|>` / `<|user|>`)
+    /// is an EOS token intercepted before detokenization, so a call whose JSON did
+    /// not close mid-stream is recovered here, mirroring the Mistral format.
+    private func processLeadingNameEOS(returnBufferedText: Bool) -> String? {
+        guard leadingNameStage == .buffering, !toolCallBuffer.isEmpty else {
+            leadingNameStage = .passthrough
+            return nil
+        }
+
+        let buffered = toolCallBuffer
+        let parsedCalls = parser.parseEOS(buffered, tools: tools)
+        appendToolCalls(parsedCalls)
+
+        toolCallBuffer = ""
+        leadingNameStage = .passthrough
+
+        return returnBufferedText && parsedCalls.isEmpty ? buffered : nil
+    }
+
+    /// Decide whether the buffered turn prefix is still, or no longer, a viable
+    /// `name\n{json}` tool call span.
+    private func leadingNameViability(_ buffer: String) -> LeadingNameViability {
+        // Safety valve against pathological unbounded buffering.
+        if buffer.count > maxJSONFallbackBufferLength {
+            return .rejected
+        }
+
+        var scan = Substring(buffer).drop(while: { $0.isWhitespace })
+        // A second call is separated by the assistant role token; skip it.
+        if scan.hasPrefix("<|assistant|>") {
+            scan = scan.dropFirst("<|assistant|>".count).drop(while: { $0.isWhitespace })
+        }
+        guard !scan.isEmpty else { return .incomplete }
+
+        if let braceIndex = scan.firstIndex(of: "{") {
+            let name = scan[..<braceIndex].trimmingCharacters(in: .whitespacesAndNewlines)
+            guard isCandidateFunctionName(name), nameMatchesToolSet(name) else {
+                return .rejected
+            }
+
+            let jsonRegion = String(scan[braceIndex...])
+            if let split = jsonObjectScanner.splitLeadingObject(from: jsonRegion) {
+                return .complete(trailing: split.trailing)
+            }
+            switch jsonObjectScanner.evaluatePrefix(in: jsonRegion) {
+            case .invalidObject: return .rejected
+            case .needsMore, .validObject: return .incomplete
+            }
+        }
+
+        // No `{` yet. Validate the (partial) leading name token.
+        if let whitespaceIndex = scan.firstIndex(where: { $0.isWhitespace }) {
+            // Name token is terminated by whitespace; the rest must stay whitespace
+            // until the `{` arrives, otherwise the name would span multiple tokens.
+            let name = String(scan[..<whitespaceIndex])
+            guard isCandidateFunctionName(name), nameMatchesToolSet(name) else {
+                return .rejected
+            }
+            if scan[whitespaceIndex...].contains(where: { !$0.isWhitespace }) {
+                return .rejected
+            }
+            return .incomplete
+        }
+
+        // Still accumulating a single token (no whitespace/brace yet).
+        let partial = String(scan)
+        guard isCandidateFunctionName(partial) else { return .rejected }
+        if let toolNameSet, !toolNameSet.contains(where: { $0.hasPrefix(partial) }) {
+            return .rejected
+        }
+        return .incomplete
+    }
+
+    /// Whether `name` is a single bare function-name token (identifier characters
+    /// only). Keeps plain prose from being treated as a call.
+    private func isCandidateFunctionName(_ name: String) -> Bool {
+        guard let first = name.first, first.isLetter || first == "_" else { return false }
+        for ch in name where !(ch.isLetter || ch.isNumber || ch == "_" || ch == "-" || ch == ".") {
+            return false
+        }
+        return true
+    }
+
+    /// When tool schemas are available, `name` must match a declared tool.
+    private func nameMatchesToolSet(_ name: String) -> Bool {
+        guard let toolNameSet else { return true }
+        return toolNameSet.contains(name)
+    }
 
     /// Process chunk for inline formats (no wrapper tags).
     ///

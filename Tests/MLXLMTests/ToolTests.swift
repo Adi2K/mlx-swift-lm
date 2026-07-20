@@ -1058,6 +1058,209 @@ struct ToolTests {
         #expect(residual == content)
     }
 
+    // MARK: - GLM-4-0414 Format Tests
+
+    /// The `get_lab_result(test_name)` schema used to gate leading-name detection.
+    private static func glm40414Tools() -> [[String: any Sendable]] {
+        [
+            [
+                "type": "function",
+                "function": [
+                    "name": "get_lab_result",
+                    "description": "Get the latest lab result for a patient.",
+                    "parameters": [
+                        "type": "object",
+                        "properties": [
+                            "test_name": [
+                                "type": "string",
+                                "description": "Name of the lab test",
+                            ] as [String: any Sendable]
+                        ] as [String: any Sendable],
+                        "required": ["test_name"],
+                    ] as [String: any Sendable],
+                ] as [String: any Sendable],
+            ]
+        ]
+    }
+
+    @Test("Test GLM-4-0414 Tool Call Parser")
+    func testGLM40414Parser() throws {
+        let parser = GLM40414ToolCallParser()
+        let content = "get_lab_result\n{\"test_name\": \"hemoglobin\"}"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "get_lab_result")
+        #expect(toolCall.function.arguments["test_name"] == .string("hemoglobin"))
+    }
+
+    @Test("Test GLM-4-0414 Tool Call Parser - No Arguments")
+    func testGLM40414ParserNoArguments() throws {
+        let parser = GLM40414ToolCallParser()
+
+        let toolCall = try #require(parser.parse(content: "list_patients\n{}", tools: nil))
+
+        #expect(toolCall.function.name == "list_patients")
+        #expect(toolCall.function.arguments.isEmpty)
+    }
+
+    @Test("Test GLM-4-0414 Tool Call Parser - Name Must Match Declared Tool")
+    func testGLM40414ParserNameMatchesTools() throws {
+        let parser = GLM40414ToolCallParser()
+        let tools = Self.glm40414Tools()
+
+        // Declared tool parses.
+        let toolCall = try #require(
+            parser.parse(content: "get_lab_result\n{\"test_name\": \"sodium\"}", tools: tools))
+        #expect(toolCall.function.name == "get_lab_result")
+        #expect(toolCall.function.arguments["test_name"] == .string("sodium"))
+
+        // Undeclared name is rejected when schemas are available.
+        #expect(
+            parser.parse(content: "drop_table\n{\"name\": \"patients\"}", tools: tools) == nil)
+    }
+
+    @Test("Test GLM-4-0414 Tool Call Parser - Multiple Calls via parseEOS")
+    func testGLM40414ParserMultipleCallsEOS() throws {
+        let parser = GLM40414ToolCallParser()
+        let content =
+            "get_weather\n{\"location\": \"Paris\"}"
+            + "<|assistant|>get_time\n{\"timezone\": \"UTC\"}"
+
+        let toolCalls = parser.parseEOS(content, tools: nil)
+
+        #expect(toolCalls.count == 2)
+        #expect(toolCalls[0].function.name == "get_weather")
+        #expect(toolCalls[0].function.arguments["location"] == .string("Paris"))
+        #expect(toolCalls[1].function.name == "get_time")
+        #expect(toolCalls[1].function.arguments["timezone"] == .string("UTC"))
+    }
+
+    @Test("Test GLM-4-0414 Tool Call Parser - Malformed Input")
+    func testGLM40414ParserMalformed() throws {
+        let parser = GLM40414ToolCallParser()
+
+        // Plain text, no JSON object.
+        #expect(parser.parse(content: "The patient looks stable.", tools: nil) == nil)
+
+        // Leading line is not a bare identifier (multi-word prose before the JSON).
+        #expect(parser.parse(content: "please call {\"a\": 1}", tools: nil) == nil)
+
+        // Truncated JSON arguments.
+        #expect(parser.parse(content: "get_lab_result\n{\"test_name\": ", tools: nil) == nil)
+
+        // Non-object JSON arguments.
+        #expect(parser.parse(content: "get_lab_result\n[1, 2]", tools: nil) == nil)
+    }
+
+    @Test("Test GLM-4-0414 Format via ToolCallProcessor - Streamed Call")
+    func testGLM40414FormatProcessorStreamed() throws {
+        let processor = ToolCallProcessor(format: .glm40414, tools: Self.glm40414Tools())
+        let chunks: [String] = [
+            "get_lab_result", "\n", "{\"test_name\":", " \"hemoglobin\"", "}",
+        ]
+
+        var text = ""
+        for chunk in chunks {
+            if let result = processor.processChunk(chunk) {
+                text += result
+            }
+        }
+        if let residual = processor.processEOS(returnBufferedText: true) {
+            text += residual
+        }
+
+        // The function name is consumed by the call, not leaked as text.
+        #expect(text.isEmpty)
+        #expect(processor.toolCalls.count == 1)
+        let toolCall = try #require(processor.toolCalls.first)
+        #expect(toolCall.function.name == "get_lab_result")
+        #expect(toolCall.function.arguments["test_name"] == .string("hemoglobin"))
+    }
+
+    @Test("Test GLM-4-0414 Format via ToolCallProcessor - Single Chunk")
+    func testGLM40414FormatProcessorSingleChunk() throws {
+        let processor = ToolCallProcessor(format: .glm40414, tools: Self.glm40414Tools())
+
+        let residual = processor.processChunk("get_lab_result\n{\"test_name\": \"glucose\"}")
+        processor.processEOS()
+
+        #expect(residual == nil)
+        #expect(processor.toolCalls.count == 1)
+        let toolCall = try #require(processor.toolCalls.first)
+        #expect(toolCall.function.name == "get_lab_result")
+        #expect(toolCall.function.arguments["test_name"] == .string("glucose"))
+    }
+
+    @Test("Test GLM-4-0414 Format via ToolCallProcessor - No Arguments")
+    func testGLM40414FormatProcessorNoArguments() throws {
+        let processor = ToolCallProcessor(format: .glm40414)
+
+        _ = processor.processChunk("list_patients\n{}")
+        processor.processEOS()
+
+        #expect(processor.toolCalls.count == 1)
+        let toolCall = try #require(processor.toolCalls.first)
+        #expect(toolCall.function.name == "list_patients")
+        #expect(toolCall.function.arguments.isEmpty)
+    }
+
+    @Test("Test GLM-4-0414 Format via ToolCallProcessor - Plain Text Passes Through")
+    func testGLM40414FormatProcessorPlainText() throws {
+        let processor = ToolCallProcessor(format: .glm40414, tools: Self.glm40414Tools())
+        let chunks: [String] = [
+            "Check", " renal", " function", " before", " prescribing", " metformin.",
+        ]
+
+        var text = ""
+        for chunk in chunks {
+            if let result = processor.processChunk(chunk) {
+                text += result
+            }
+        }
+        if let residual = processor.processEOS(returnBufferedText: true) {
+            text += residual
+        }
+
+        #expect(processor.toolCalls.isEmpty)
+        #expect(text == "Check renal function before prescribing metformin.")
+    }
+
+    @Test("Test GLM-4-0414 Format via ToolCallProcessor - Malformed Call Degrades to Text")
+    func testGLM40414FormatProcessorMalformedDegradesToText() throws {
+        let processor = ToolCallProcessor(format: .glm40414, tools: Self.glm40414Tools())
+        // Name confirmed but the JSON never closes (generation cut off).
+        let content = "get_lab_result\n{\"test_name\": "
+
+        _ = processor.processChunk(content)
+        let residual = processor.processEOS(returnBufferedText: true)
+
+        #expect(processor.toolCalls.isEmpty)
+        #expect(residual == content)
+    }
+
+    @Test("Test GLM-4-0414 Format via ToolCallProcessor - Multiple Streamed Calls")
+    func testGLM40414FormatProcessorMultipleCalls() throws {
+        let processor = ToolCallProcessor(format: .glm40414)
+        let chunks: [String] = [
+            "get_weather\n{\"location\": \"Paris\"}",
+            "<|assistant|>get_time\n{\"timezone\": \"UTC\"}",
+        ]
+
+        for chunk in chunks {
+            _ = processor.processChunk(chunk)
+        }
+        processor.processEOS()
+
+        #expect(processor.toolCalls.count == 2)
+        let first = try #require(processor.toolCalls.first)
+        #expect(first.function.name == "get_weather")
+        #expect(first.function.arguments["location"] == .string("Paris"))
+        let second = processor.toolCalls[1]
+        #expect(second.function.name == "get_time")
+        #expect(second.function.arguments["timezone"] == .string("UTC"))
+    }
+
     // MARK: - Kimi K2 Format Tests
 
     @Test("Test Kimi K2 Tool Call Parser")
@@ -1190,6 +1393,7 @@ struct ToolTests {
         #expect(ToolCallFormat.lfm2.rawValue == "lfm2")
         #expect(ToolCallFormat.xmlFunction.rawValue == "xml_function")
         #expect(ToolCallFormat.glm4.rawValue == "glm4")
+        #expect(ToolCallFormat.glm40414.rawValue == "glm4_0414")
         #expect(ToolCallFormat.gemma.rawValue == "gemma")
         #expect(ToolCallFormat.gptOss.rawValue == "gpt_oss")
         #expect(ToolCallFormat.kimiK2.rawValue == "kimi_k2")
@@ -1214,8 +1418,10 @@ struct ToolTests {
         #expect(ToolCallFormat.infer(from: "LFM2_5") == .lfm2)
         #expect(ToolCallFormat.infer(from: "lfm25") == .lfm2)
 
-        // GLM4 models (prefix matching)
-        #expect(ToolCallFormat.infer(from: "glm4") == .glm4)
+        // GLM-4-0414 dense models: model_type is exactly "glm4"
+        #expect(ToolCallFormat.infer(from: "glm4") == .glm40414)
+        #expect(ToolCallFormat.infer(from: "GLM4") == .glm40414)
+        // GLM-4.5/4.6 MoE and other glm4* variants keep the tagged .glm4 format
         #expect(ToolCallFormat.infer(from: "glm4_moe") == .glm4)
         #expect(ToolCallFormat.infer(from: "glm4_moe_lite") == .glm4)
         #expect(ToolCallFormat.infer(from: "glm4_5") == .glm4)
