@@ -33,6 +33,7 @@ mlx-swift-lm supports function calling / tool use with multiple model-specific f
 | `.xmlFunction` | Nemotron, Qwen3 Coder, Qwen3.5 | `<tool_call><function=name><parameter=k>v</parameter></function></tool_call>` |
 | `.glm4` | GLM4 | `func<arg_key>k</arg_key><arg_value>v</arg_value>` |
 | `.gemma` | Gemma | `call:name{key:value}` |
+| `.gptOss` | GPT-OSS | `<\|channel\|>commentary to=functions.name <\|constrain\|>json<\|message\|>{...}<\|call\|>` |
 | `.kimiK2` | Kimi K2 | `functions.name:0<\|tool_call_argument_begin\|>{...}` |
 | `.minimaxM2` | MiniMax M2 | `<invoke name="f"><parameter name="k">v</parameter></invoke>` |
 

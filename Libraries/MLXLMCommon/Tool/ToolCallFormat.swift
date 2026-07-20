@@ -86,6 +86,10 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
     /// Example: `<|tool_call>call:name{key:<|"|>value<|"|>}<tool_call|>`
     case gemma4
 
+    /// GPT-OSS harmony format with channel markers and a functions recipient.
+    /// Example: `<|channel|>commentary to=functions.name <|constrain|>json<|message|>{"key": "value"}<|call|>`
+    case gptOss = "gpt_oss"
+
     /// Kimi K2 format with functions prefix.
     /// Example: `functions.name:0<|tool_call_argument_begin|>{"key": "value"}`
     case kimiK2 = "kimi_k2"
@@ -124,6 +128,8 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
         case .gemma4:
             return GemmaFunctionParser(
                 startTag: "<|tool_call>", endTag: "<tool_call|>", escapeMarker: "<|\"|>")
+        case .gptOss:
+            return GPTOSSToolCallParser()
         case .kimiK2:
             return KimiK2ToolCallParser()
         case .minimaxM2:
@@ -199,6 +205,11 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
         // Gemma
         if type == "gemma" {
             return .gemma
+        }
+
+        // GPT-OSS family (gpt_oss, gpt_oss_moe, etc.)
+        if type.hasPrefix("gpt_oss") {
+            return .gptOss
         }
 
         // Nemotron family (nemotron_h, etc.)
