@@ -55,7 +55,7 @@ public struct GemmaFunctionParser: ToolCallParser, Sendable {
         // value is never truncated and its remainder never becomes a stray key.
         for field in scanner.splitTopLevel(body, separator: ",") {
             guard let colon = scanner.firstTopLevelIndex(of: ":", in: field) else { continue }
-            let key = String(field[..<colon])
+            let key = String(field[..<colon].trimmingWhitespace())
             guard !key.isEmpty else { continue }
 
             let rawValue = field[field.index(after: colon)...].trimmingWhitespace()

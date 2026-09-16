@@ -1495,6 +1495,20 @@ struct ToolTests {
         #expect(value == .object(["_count": .string("1"), "_sort": .string("-effectiveDateTime")]))
     }
 
+    @Test("Gemma trims a space before a top-level argument key")
+    func testGemmaTopLevelKeyAfterSpace() throws {
+        let parser = GemmaFunctionParser(
+            startTag: "<|tool_call>", endTag: "<tool_call|>", escapeMarker: #"<|"|>"#)
+        let tools = Self.gemmaTools("get_weather", ["city": "string", "days": "integer"])
+        let content = #"<|tool_call>call:get_weather{city:<|"|>Paris<|"|>, days:3}<tool_call|>"#
+
+        let toolCall = try #require(parser.parse(content: content, tools: tools))
+
+        #expect(toolCall.function.arguments.count == 2)
+        #expect(toolCall.function.arguments["city"] == .string("Paris"))
+        #expect(toolCall.function.arguments["days"] == .int(3))
+    }
+
     @Test("Gemma reads marker-quoted strings in an array nested several objects deep")
     func testGemmaMarkerStringsInDeeplyNestedArray() throws {
         let marker = #"<|"|>"#
