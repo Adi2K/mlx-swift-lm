@@ -95,13 +95,61 @@ public struct GemmaFunctionParser: ToolCallParser, Sendable {
         let literal = String(rawValue)
         guard let declaredType = getParameterType(funcName: funcName, paramName: key, tools: tools)
         else {
-            return structuredValues.parse(literal) ?? literal
+            return parseStructured(literal, marker: marker) ?? literal
         }
 
-        if Self.isStructured(declaredType), let value = structuredValues.parse(literal) {
+        if Self.isStructured(declaredType), let value = parseStructured(literal, marker: marker) {
             return value
         }
         return convertParameterValue(literal, paramName: key, funcName: funcName, tools: tools)
+    }
+
+    /// Parses a brace-form literal, then retries with nested marker strings quoted as JSON.
+    private func parseStructured(_ literal: String, marker: String) -> (any Sendable)? {
+        if let value = structuredValues.parse(literal) { return value }
+        guard literal.contains(marker) else { return nil }
+        return structuredValues.parse(Self.quotingMarkedStrings(literal, marker: marker))
+    }
+
+    /// Rewrites each `marker…marker` span as a JSON string literal.
+    /// An unterminated marker leaves the rest of the text unchanged.
+    private static func quotingMarkedStrings(_ literal: String, marker: String) -> String {
+        var out = ""
+        var rest = literal[...]
+        while let open = rest.range(of: marker) {
+            out += rest[..<open.lowerBound]
+            let afterOpen = rest[open.upperBound...]
+            guard let close = afterOpen.range(of: marker) else {
+                out += rest[open.lowerBound...]
+                return out
+            }
+            out += jsonStringLiteral(afterOpen[..<close.lowerBound])
+            rest = afterOpen[close.upperBound...]
+        }
+        out += rest
+        return out
+    }
+
+    /// Quotes `text` as a JSON string, escaping backslash, double quote, and control characters.
+    private static func jsonStringLiteral(_ text: Substring) -> String {
+        var out = "\""
+        for scalar in text.unicodeScalars {
+            switch scalar {
+            case "\"": out += "\\\""
+            case "\\": out += "\\\\"
+            case "\n": out += "\\n"
+            case "\r": out += "\\r"
+            case "\t": out += "\\t"
+            case "\u{08}": out += "\\b"
+            case "\u{0C}": out += "\\f"
+            case _ where scalar.value < 0x20:
+                let hex = String(scalar.value, radix: 16, uppercase: true)
+                out += (scalar.value < 0x10 ? "\\u000" : "\\u00") + hex
+            default:
+                out.unicodeScalars.append(scalar)
+            }
+        }
+        return out + "\""
     }
 
     /// Whether a declared schema type is one the dialect writes in brace form.
