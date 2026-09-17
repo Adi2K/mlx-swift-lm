@@ -1829,6 +1829,66 @@ struct ToolTests {
         #expect(toolCall.function.arguments["days"] == .string("3"))
     }
 
+    @Test("Gemma reads a nested bare key that contains a space")
+    func testGemmaNestedBareKeyWithSpace() throws {
+        // The chat template writes keys raw, so a schema key with a space arrives bare.
+        let value = try gemmaNestedValue(#"{given name:<|"|>Maria<|"|>,a b:1}"#)
+
+        #expect(value == .object(["given name": .string("Maria"), "a b": .int(1)]))
+    }
+
+    @Test("Gemma reads a JSON-quoted top-level key and string value")
+    func testGemmaJSONQuotedTopLevelKeyAndValue() throws {
+        let parser = GemmaFunctionParser(
+            startTag: "<|tool_call>", endTag: "<tool_call|>", escapeMarker: #"<|"|>"#)
+        let content =
+            #"<|tool_call>call:search{"query":"say \"hi\", then go",limit:5,"#
+            + #"path:"C:\users"}<tool_call|>"#
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.arguments.count == 3)
+        #expect(toolCall.function.arguments["query"] == .string(#"say "hi", then go"#))
+        #expect(toolCall.function.arguments["limit"] == .string("5"))
+        // Not a JSON string (`\u` needs four hex digits), so the text is kept as written.
+        #expect(toolCall.function.arguments["path"] == .string(#""C:\users""#))
+    }
+
+    @Test("FunctionGemma reads JSON-quoted and escape-marker strings in one object")
+    func testFunctionGemmaQuotedAndMarkedStringsInOneObject() throws {
+        let parser = GemmaFunctionParser(
+            startTag: "<start_function_call>", endTag: "<end_function_call>",
+            escapeMarker: "<escape>")
+        let content =
+            #"<start_function_call>call:f{p:{a:"x<escape>y",b:<escape>z"w<escape>}}"#
+            + "<end_function_call>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        // Whichever delimiter opens a string decides how it is read.
+        #expect(
+            toolCall.function.arguments["p"]
+                == .object(["a": .string("x<escape>y"), "b": .string(#"z"w"#)]))
+    }
+
+    @Test("Gemma keeps the last value of a repeated nested key")
+    func testGemmaRepeatedNestedKeyKeepsLastValue() throws {
+        // As at the top level. Foundation's JSON decoder, used before, kept the first.
+        let value = try gemmaNestedValue("{unit:1,unit:2}")
+
+        #expect(value == .object(["unit": .int(2)]))
+    }
+
+    @Test("Gemma keeps the raw text of a value nested deeper than the parser allows")
+    func testGemmaDeepNestingStaysLiteral() throws {
+        let nested = { (depth: Int) in
+            String(repeating: "[", count: depth) + "1" + String(repeating: "]", count: depth)
+        }
+
+        #expect(try gemmaNestedValue(nested(40)) == .string(nested(40)))
+        #expect(try gemmaNestedValue(nested(20)) != .string(nested(20)))
+    }
+
     @Test("Test Gemma 4 Format via ToolCallProcessor")
     func testGemma4FormatProcessor() throws {
         let processor = ToolCallProcessor(format: .gemma4)
