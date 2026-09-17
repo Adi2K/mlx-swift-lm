@@ -13,9 +13,6 @@ public struct GemmaFunctionParser: ToolCallParser, Sendable {
     /// so both spans have to be opaque while the argument list is split.
     private let scanner: StructuredTextScanner
 
-    /// Nested objects and arrays are written in the dialect's brace form, whose keys are unquoted.
-    private let structuredValues = BareKeyJSONParser()
-
     public init(startTag: String, endTag: String, escapeMarker: String) {
         self.startTag = startTag
         self.endTag = endTag
@@ -54,9 +51,9 @@ public struct GemmaFunctionParser: ToolCallParser, Sendable {
         // belongs to an escaped string or a nested object out of the split, so a
         // value is never truncated and its remainder never becomes a stray key.
         for field in scanner.splitTopLevel(body, separator: ",") {
-            guard let colon = scanner.firstTopLevelIndex(of: ":", in: field) else { continue }
-            let key = Self.unmarked(field[..<colon].trimmingWhitespace(), marker: marker)
-            guard !key.isEmpty else { continue }
+            guard let colon = scanner.firstTopLevelIndex(of: ":", in: field),
+                let key = GemmaLiteralParser.key(field[..<colon], marker: marker), !key.isEmpty
+            else { continue }
 
             let rawValue = field[field.index(after: colon)...].trimmingWhitespace()
             arguments[key] = value(
@@ -73,8 +70,8 @@ public struct GemmaFunctionParser: ToolCallParser, Sendable {
     /// is typed from the schema when the parameter is declared, and otherwise
     /// decoded as JSON, falling back to the literal text.
     ///
-    /// A parameter the schema declares structured is read as a brace-form literal first: the
-    /// dialect writes those without quoting their keys, which strict JSON refuses.
+    /// A JSON-quoted string is unquoted. A value that opens with a brace or bracket is read by
+    /// `GemmaLiteralParser`, unless the schema declares the parameter a scalar.
     private func value(
         of rawValue: Substring,
         key: String,
@@ -92,74 +89,28 @@ public struct GemmaFunctionParser: ToolCallParser, Sendable {
                 unescaped, paramName: key, funcName: funcName, tools: tools)
         }
 
+        if rawValue.first == "\"",
+            let string = GemmaLiteralParser.parse(rawValue, marker: marker) as? String
+        {
+            return convertParameterValue(string, paramName: key, funcName: funcName, tools: tools)
+        }
+
         let literal = String(rawValue)
         guard let declaredType = getParameterType(funcName: funcName, paramName: key, tools: tools)
         else {
-            return parseStructured(literal, marker: marker) ?? literal
+            return structured(rawValue, marker: marker) ?? literal
         }
 
-        if Self.isStructured(declaredType), let value = parseStructured(literal, marker: marker) {
+        if Self.isStructured(declaredType), let value = structured(rawValue, marker: marker) {
             return value
         }
         return convertParameterValue(literal, paramName: key, funcName: funcName, tools: tools)
     }
 
-    /// Strips a marker pair around a key, which the model sometimes writes.
-    /// Nested keys get this from `quotingMarkedStrings`; a top-level key is read directly.
-    private static func unmarked(_ key: Substring, marker: String) -> String {
-        guard key.count >= 2 * marker.count, key.hasPrefix(marker), key.hasSuffix(marker)
-        else { return String(key) }
-        return String(key.dropFirst(marker.count).dropLast(marker.count))
-    }
-
-    /// Parses a brace-form literal, then retries with nested marker strings quoted as JSON.
-    /// The original text goes first: FunctionGemma's `<escape>` can sit inside a JSON-quoted
-    /// string, as in `{a:"<escape>hi<escape>"}`, which the rewrite would break.
-    private func parseStructured(_ literal: String, marker: String) -> (any Sendable)? {
-        if let value = structuredValues.parse(literal) { return value }
-        guard literal.contains(marker) else { return nil }
-        return structuredValues.parse(Self.quotingMarkedStrings(literal, marker: marker))
-    }
-
-    /// Rewrites each `marker…marker` span as a JSON string literal.
-    /// An unterminated marker leaves the rest of the text unchanged.
-    private static func quotingMarkedStrings(_ literal: String, marker: String) -> String {
-        var out = ""
-        var rest = literal[...]
-        while let open = rest.range(of: marker) {
-            out += rest[..<open.lowerBound]
-            let afterOpen = rest[open.upperBound...]
-            guard let close = afterOpen.range(of: marker) else {
-                out += rest[open.lowerBound...]
-                return out
-            }
-            out += jsonStringLiteral(afterOpen[..<close.lowerBound])
-            rest = afterOpen[close.upperBound...]
-        }
-        out += rest
-        return out
-    }
-
-    /// Quotes `text` as a JSON string, escaping backslash, double quote, and control characters.
-    private static func jsonStringLiteral(_ text: Substring) -> String {
-        var out = "\""
-        for scalar in text.unicodeScalars {
-            switch scalar {
-            case "\"": out += "\\\""
-            case "\\": out += "\\\\"
-            case "\n": out += "\\n"
-            case "\r": out += "\\r"
-            case "\t": out += "\\t"
-            case "\u{08}": out += "\\b"
-            case "\u{0C}": out += "\\f"
-            case _ where scalar.value < 0x20:
-                let hex = String(scalar.value, radix: 16, uppercase: true)
-                out += (scalar.value < 0x10 ? "\\u000" : "\\u00") + hex
-            default:
-                out.unicodeScalars.append(scalar)
-            }
-        }
-        return out + "\""
+    /// A nested object or array. A bare scalar stays text, for the tool schema to type.
+    private func structured(_ rawValue: Substring, marker: String) -> (any Sendable)? {
+        guard rawValue.first == "{" || rawValue.first == "[" else { return nil }
+        return GemmaLiteralParser.parse(rawValue, marker: marker)
     }
 
     /// Whether a declared schema type is one the dialect writes in brace form.
