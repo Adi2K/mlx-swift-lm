@@ -1755,6 +1755,80 @@ struct ToolTests {
                 == .object(["_count": .string("1"), "note": .string("line one\nline two")]))
     }
 
+    @Test("Gemma reads JSON escapes in a nested JSON-quoted string")
+    func testGemmaNestedJSONStringEscapes() throws {
+        let value = try gemmaNestedValue(#"{note:"tab\there \u00e9 \ud83d\ude00 \"q\" \\"}"#)
+
+        #expect(value == .object(["note": .string("tab\there é 😀 \"q\" \\")]))
+    }
+
+    @Test("Gemma types nested bare scalars as JSON does")
+    func testGemmaNestedScalars() throws {
+        let value = try gemmaNestedValue("{n:null,i:-7,d:3.14,t:true,f:false}")
+
+        #expect(
+            value
+                == .object([
+                    "n": .null, "i": .int(-7), "d": .double(3.14), "t": .bool(true),
+                    "f": .bool(false),
+                ]))
+    }
+
+    @Test("Gemma reads empty groups and a trailing comma inside a nested value")
+    func testGemmaNestedEmptyGroupsAndTrailingComma() throws {
+        let value = try gemmaNestedValue("{o:{},a:[],t:[1,2,],u:{k:1,}}")
+
+        #expect(
+            value
+                == .object([
+                    "o": .object([:]), "a": .array([]), "t": .array([.int(1), .int(2)]),
+                    "u": .object(["k": .int(1)]),
+                ]))
+    }
+
+    @Test(
+        "Gemma keeps the raw text of a nested value with an empty member",
+        arguments: ["{a:1,,b:2}", "{,a:1}", "[1,,2]", "{a:}"])
+    func testGemmaNestedEmptyMemberStaysLiteral(_ body: String) throws {
+        let value = try gemmaNestedValue(body)
+
+        #expect(value == .string(body))
+    }
+
+    @Test("Gemma reads a nested value written across lines")
+    func testGemmaNestedValueAcrossLines() throws {
+        let marker = #"<|"|>"#
+        let body =
+            "[\n  {old:\(marker)# Title\n\(marker),\n"
+            + "   new:\(marker)# Title\n\nUse \"fast\" mode.\n\(marker)},\n"
+            + "  { old : \(marker)a\(marker) , new : \(marker)b\(marker) }\n]"
+        let value = try gemmaNestedValue(body)
+
+        #expect(
+            value
+                == .array([
+                    .object([
+                        "old": .string("# Title\n"),
+                        "new": .string("# Title\n\nUse \"fast\" mode.\n"),
+                    ]),
+                    .object(["old": .string("a"), "new": .string("b")]),
+                ]))
+    }
+
+    @Test("Gemma skips a top-level member that has no colon")
+    func testGemmaTopLevelMemberWithoutColonIsSkipped() throws {
+        let parser = GemmaFunctionParser(
+            startTag: "<|tool_call>", endTag: "<tool_call|>", escapeMarker: #"<|"|>"#)
+        let content = #"<|tool_call>call:f{city:<|"|>Paris<|"|>,oops,days:3}<tool_call|>"#
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        // A small model that forgets to escape a comma still gets its later arguments.
+        #expect(toolCall.function.arguments.count == 2)
+        #expect(toolCall.function.arguments["city"] == .string("Paris"))
+        #expect(toolCall.function.arguments["days"] == .string("3"))
+    }
+
     @Test("Test Gemma 4 Format via ToolCallProcessor")
     func testGemma4FormatProcessor() throws {
         let processor = ToolCallProcessor(format: .gemma4)
@@ -1816,6 +1890,15 @@ struct ToolTests {
         let content = "<|tool_call>call:fhir_search{searchParams:\(body)}<tool_call|>"
         let toolCall = try #require(parser.parse(content: content, tools: Self.gemmaSearchTools))
         return toolCall.function.arguments["searchParams"]
+    }
+
+    /// Parses a Gemma 4 call with no tool schema and returns its `p` argument.
+    private func gemmaNestedValue(_ body: String) throws -> JSONValue? {
+        let parser = GemmaFunctionParser(
+            startTag: "<|tool_call>", endTag: "<tool_call|>", escapeMarker: #"<|"|>"#)
+        let toolCall = try #require(
+            parser.parse(content: "<|tool_call>call:f{p:\(body)}<tool_call|>", tools: nil))
+        return toolCall.function.arguments["p"]
     }
 
     // MARK: - Kimi K2 Format Tests
