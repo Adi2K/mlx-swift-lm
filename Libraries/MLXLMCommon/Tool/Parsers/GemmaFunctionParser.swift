@@ -55,7 +55,7 @@ public struct GemmaFunctionParser: ToolCallParser, Sendable {
         // value is never truncated and its remainder never becomes a stray key.
         for field in scanner.splitTopLevel(body, separator: ",") {
             guard let colon = scanner.firstTopLevelIndex(of: ":", in: field) else { continue }
-            let key = String(field[..<colon].trimmingWhitespace())
+            let key = Self.unmarked(field[..<colon].trimmingWhitespace(), marker: marker)
             guard !key.isEmpty else { continue }
 
             let rawValue = field[field.index(after: colon)...].trimmingWhitespace()
@@ -104,7 +104,17 @@ public struct GemmaFunctionParser: ToolCallParser, Sendable {
         return convertParameterValue(literal, paramName: key, funcName: funcName, tools: tools)
     }
 
+    /// Strips a marker pair around a key, which the model sometimes writes.
+    /// Nested keys get this from `quotingMarkedStrings`; a top-level key is read directly.
+    private static func unmarked(_ key: Substring, marker: String) -> String {
+        guard key.count >= 2 * marker.count, key.hasPrefix(marker), key.hasSuffix(marker)
+        else { return String(key) }
+        return String(key.dropFirst(marker.count).dropLast(marker.count))
+    }
+
     /// Parses a brace-form literal, then retries with nested marker strings quoted as JSON.
+    /// The original text goes first: FunctionGemma's `<escape>` can sit inside a JSON-quoted
+    /// string, as in `{a:"<escape>hi<escape>"}`, which the rewrite would break.
     private func parseStructured(_ literal: String, marker: String) -> (any Sendable)? {
         if let value = structuredValues.parse(literal) { return value }
         guard literal.contains(marker) else { return nil }

@@ -1509,6 +1509,27 @@ struct ToolTests {
         #expect(toolCall.function.arguments["days"] == .int(3))
     }
 
+    @Test(
+        "Gemma reads a marker-quoted top-level argument key",
+        arguments: [
+            #"{<|"|>city<|"|>:<|"|>Paris<|"|>,days:3}"#,
+            #"{city:<|"|>Paris<|"|>, <|"|>days<|"|>:3}"#,
+        ])
+    func testGemmaMarkerQuotedTopLevelKey(_ body: String) throws {
+        // The template writes keys bare. gemma-4-e2b-it marker-quoted a nested key in live
+        // output; the top level is read the same way, as transformers and mlx-lm do.
+        let parser = GemmaFunctionParser(
+            startTag: "<|tool_call>", endTag: "<tool_call|>", escapeMarker: #"<|"|>"#)
+        let tools = Self.gemmaTools("get_weather", ["city": "string", "days": "integer"])
+        let content = "<|tool_call>call:get_weather\(body)<tool_call|>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: tools))
+
+        #expect(toolCall.function.arguments.count == 2)
+        #expect(toolCall.function.arguments["city"] == .string("Paris"))
+        #expect(toolCall.function.arguments["days"] == .int(3))
+    }
+
     @Test("Gemma reads marker-quoted strings in an array nested several objects deep")
     func testGemmaMarkerStringsInDeeplyNestedArray() throws {
         let marker = #"<|"|>"#
